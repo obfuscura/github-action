@@ -1,0 +1,117 @@
+name: 'Obfuscura Encode'
+description: 'Encode PHP files with Obfuscura in your CI/CD pipeline. Multi-layer bytecode encoding with zero server extensions.'
+author: 'Obfuscura'
+
+branding:
+  icon: 'lock'
+  color: 'green'
+
+inputs:
+  api-key:
+    description: 'Your Obfuscura project API key. Store as a GitHub secret.'
+    required: true
+  source:
+    description: 'Path to the PHP file or ZIP archive to encode.'
+    required: true
+  output:
+    description: 'Path to save the encoded output. Defaults to source path with -encoded suffix.'
+    required: false
+    default: ''
+  string-encryption:
+    description: 'Enable string encryption (true/false).'
+    required: false
+    default: 'true'
+  control-flow:
+    description: 'Enable control flow flattening (true/false).'
+    required: false
+    default: 'true'
+  dead-code:
+    description: 'Enable dead code injection (true/false).'
+    required: false
+    default: 'false'
+  license-binding:
+    description: 'Require valid license at runtime (true/false).'
+    required: false
+    default: 'true'
+  include-loader:
+    description: 'Download and include the runtime loader in output (true/false).'
+    required: false
+    default: 'true'
+  api-url:
+    description: 'Obfuscura API base URL. Override for enterprise/self-hosted.'
+    required: false
+    default: 'https://obfuscura.com/api/v1'
+
+outputs:
+  encoded-file:
+    description: 'Path to the encoded output file.'
+    value: ${{ steps.encode.outputs.encoded-file }}
+  loader-file:
+    description: 'Path to the downloaded loader file (if include-loader is true).'
+    value: ${{ steps.download-loader.outputs.loader-file }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate inputs
+      shell: bash
+      run: |
+        if [ ! -f "${{ inputs.source }}" ]; then
+          echo "::error::Source file not found: ${{ inputs.source }}"
+          exit 1
+        fi
+        echo "source=${{ inputs.source }}" >> $GITHUB_ENV
+
+    - name: Determine output path
+      shell: bash
+      run: |
+        OUTPUT="${{ inputs.output }}"
+        if [ -z "$OUTPUT" ]; then
+          SOURCE="${{ inputs.source }}"
+          EXT="${SOURCE##*.}"
+          BASE="${SOURCE%.*}"
+          OUTPUT="${BASE}-encoded.${EXT}"
+        fi
+        echo "output=$OUTPUT" >> $GITHUB_ENV
+        echo "::notice::Output will be saved to $OUTPUT"
+
+    - name: Encode files
+      id: encode
+      shell: bash
+      run: |
+        HTTP_CODE=$(curl -s -w "%{http_code}" -o "${{ env.output }}" \
+          -X POST "${{ inputs.api-url }}/encode" \
+          -H "X-Api-Key: ${{ inputs.api-key }}" \
+          -F "file=@${{ inputs.source }}" \
+          -F "options[string_encryption]=${{ inputs.string-encryption }}" \
+          -F "options[control_flow]=${{ inputs.control-flow }}" \
+          -F "options[dead_code]=${{ inputs.dead-code }}" \
+          -F "options[license_binding]=${{ inputs.license-binding }}")
+
+        if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+          echo "::error::Encoding failed with HTTP $HTTP_CODE"
+          cat "${{ env.output }}"
+          exit 1
+        fi
+
+        echo "encoded-file=${{ env.output }}" >> $GITHUB_OUTPUT
+        echo "::notice::Encoded file saved to ${{ env.output }}"
+
+    - name: Download loader
+      id: download-loader
+      if: inputs.include-loader == 'true'
+      shell: bash
+      run: |
+        LOADER_DIR=$(dirname "${{ env.output }}")
+        LOADER_PATH="${LOADER_DIR}/obfuscura-loader.php"
+
+        HTTP_CODE=$(curl -s -w "%{http_code}" -o "$LOADER_PATH" \
+          -X GET "${{ inputs.api-url }}/encode/loader" \
+          -H "X-Api-Key: ${{ inputs.api-key }}")
+
+        if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+          echo "::warning::Failed to download loader (HTTP $HTTP_CODE). You can download it manually from the dashboard."
+        else
+          echo "loader-file=$LOADER_PATH" >> $GITHUB_OUTPUT
+          echo "::notice::Loader saved to $LOADER_PATH"
+        fi
